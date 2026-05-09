@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>JS FPS - Score on Game Over</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #fff; }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 12px; height: 12px; border: 2px solid #ff0000;
+            transform: translate(-50%, -50%); pointer-events: none;
+        }
+        #ui {
+            position: absolute; bottom: 20px; left: 20px;
+            color: #000; font-family: 'Courier New', Courier, monospace;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        #kill-ui {
+            position: absolute; top: 20px; left: 50%;
+            transform: translateX(-50%);
+            color: #000; font-family: 'Courier New', Courier, monospace;
+            font-size: 32px; font-weight: bold; pointer-events: none;
+        }
+        #heal-ui {
+            position: absolute; bottom: 85px; left: 20px;
+            color: #27ae60; font-family: 'Courier New', Courier, monospace;
+            font-size: 18px; font-weight: bold;
+        }
+        #hp-bar-container { width: 200px; height: 10px; border: 1px solid #000; background: rgba(255,255,255,0.5); }
+        #hp-bar { width: 100%; height: 100%; background: #ff0000; transition: width 0.3s; }
+        #ammo-display { font-size: 24px; font-weight: bold; color: #000; }
+        #instructions {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); color: black;
+            text-align: center; font-family: sans-serif;
+            background: rgba(255,255,255,0.9); padding: 30px; cursor: pointer; border: 2px solid #000;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="kill-ui">SCORE: 0</div>
+    <div id="heal-ui">HEAL: READY [X]</div>
+    <div id="ui">
+        <div id="ammo-display">AMMO: 30 / ∞</div>
+        <div>
+            <div style="font-size: 12px; font-weight: bold;">SURVIVAL HP</div>
+            <div id="hp-bar-container"><div id="hp-bar"></div></div>
+        </div>
+    </div>
+    <div id="instructions">
+        <h1>BATTLE START</h1>
+        <p>W,A,S,D: 이동 | SPACE: 점프 | CTRL: 웅크리기</p>
+        <p>X: 회복 | R: 장전 | 마우스 왼쪽: 발사</p>
+        <p><b>클릭하여 시작</b></p>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xffffff);
+        scene.fog = new THREE.Fog(0xffffff, 10, 100);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        let health = 100, ammo = 30, score = 0, isGameOver = false;
+        let isReloading = false, isAiming = false, canJump = true, isCrouching = false;
+        let lastHealTime = 0;
+        const healCooldown = 10000;
+
+        const velocity = new THREE.Vector3();
+        const gravity = 30.0;
+        const jumpPower = 12.0;
+
+        const gunGroup = new THREE.Group();
+        const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.5), new THREE.MeshStandardMaterial({color: 0x000000}));
+        gunGroup.add(gunBody);
+        const idlePos = new THREE.Vector3(0.3, -0.25, -0.5), aimPos = new THREE.Vector3(0, -0.15, -0.3);
+        gunGroup.position.copy(idlePos);
+        camera.add(gunGroup);
+        scene.add(camera);
+        scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+        
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({ color: 0xeeeeee }));
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+
+        const obstacles = [];
+        for(let i=0; i<30; i++) {
+            const box = new THREE.Mesh(new THREE.BoxGeometry(3, 5, 3), new THREE.MeshStandardMaterial({color: 0xcccccc}));
+            box.position.set(Math.random()*120-60, 2.5, Math.random()*-100);
+            scene.add(box);
+            obstacles.push(box);
+        }
+
+        const enemies = [];
+        for(let i=0; i<6; i++) {
+            const group = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2.5, 1.2), new THREE.MeshStandardMaterial({color: 0xff0000}));
+            body.position.y = 1.25; group.add(body);
+            const head = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), new THREE.MeshStandardMaterial({color: 0xaa0000}));
+            head.position.y = 2.8; group.add(head);
+            group.position.set(Math.random()*80-40, 0, Math.random()*-60-20);
+            group.userData = { alive: true, lastShot: 0, body: body, head: head };
+            scene.add(group); enemies.push(group);
+        }
+
+        const controls = new PointerLockControls(camera, document.body);
+        let moveF = false, moveB = false, moveL = false, moveR = false, isFiring = false, lastFireTime = 0;
+
+        document.getElementById('instructions').addEventListener('click', () => {
+            if(!isGameOver) controls.lock();
+        });
+        controls.addEventListener('lock', () => instructions.style.display = 'none');
+        controls.addEventListener('unlock', () => { if(!isGameOver) instructions.style.display = 'block'; });
+
+        function playerShoot() {
+            if (isReloading || ammo <= 0) { if(ammo <= 0) reload(); return; }
+            ammo--;
+            document.getElementById('ammo-display').innerText = `AMMO: ${ammo} / ∞`;
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const targetObjs = [];
+            enemies.forEach(e => { if(e.userData.alive) targetObjs.push(e.userData.body, e.userData.head); });
+            const hits = raycaster.intersectObjects([...targetObjs, ...obstacles]);
+            const muzzle = new THREE.Vector3().setFromMatrixPosition(gunBody.matrixWorld);
+            let end = new THREE.Vector3(0,0,-100).applyMatrix4(camera.matrixWorld);
+            let tracerColor = 0x0000ff;
+
+            if (hits.length > 0) {
+                end = hits[0].point;
+                enemies.forEach(enemy => {
+                    if (enemy.userData.alive && (hits[0].object === enemy.userData.body || hits[0].object === enemy.userData.head)) {
+                        const isHead = (hits[0].object === enemy.userData.head);
+                        enemy.userData.alive = false; enemy.position.y = -20;
+                        score += isHead ? 3 : 1;
+                        if(isHead) tracerColor = 0xffaa00;
+                        document.getElementById('kill-ui').innerText = `SCORE: ${score}`;
+                        setTimeout(() => { 
+                            if(!isGameOver) {
+                                enemy.position.set(Math.random()*80-40, 0, Math.random()*-60-20); 
+                                enemy.userData.alive = true; enemy.position.y = 0; 
+                            }
+                        }, 3000);
+                    }
+                });
+            }
+            createTracer(muzzle, end, tracerColor);
+        }
+
+        function createTracer(s, e, c) {
+            const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([s, e]), new THREE.LineBasicMaterial({color: c, transparent: true, opacity: 0.4}));
+            scene.add(line);
+            setTimeout(() => { scene.remove(line); line.geometry.dispose(); }, 30);
+        }
+
+        function reload() {
+            if (isReloading || ammo === 30) return;
+            isReloading = true;
+            document.getElementById('ammo-display').innerText = "RELOADING...";
+            gunGroup.position.y = -0.6;
+            setTimeout(() => { ammo = 30; isReloading = false; document.getElementById('ammo-display').innerText = `AMMO: ${ammo} / ∞`; }, 1200);
+        }
+
+        window.addEventListener('keydown', e => {
+            if (e.code === 'KeyW') moveF = true; if (e.code === 'KeyS') moveB = true;
+            if (e.code === 'KeyA') moveL = true; if (e.code === 'KeyD') moveR = true;
+            if (e.code === 'Space' && canJump && !isCrouching) { velocity.y += jumpPower; canJump = false; }
+            if (e.code === 'ControlLeft') isCrouching = true;
+            if (e.code === 'KeyR') reload();
+            if (e.code === 'KeyX') {
+                const now = performance.now();
+                if (now - lastHealTime > healCooldown && health < 100) { health = Math.min(100, health + 40); lastHealTime = now; }
+            }
+        });
+        window.addEventListener('keyup', e => {
+            if (e.code === 'KeyW') moveF = false; if (e.code === 'KeyS') moveB = false;
+            if (e.code === 'KeyA') moveL = false; if (e.code === 'KeyD') moveR = false;
+            if (e.code === 'ControlLeft') isCrouching = false;
+        });
+        window.addEventListener('contextmenu', e => e.preventDefault());
+        window.addEventListener('mousedown', e => { if (e.button === 0) isFiring = true; if (e.button === 2) isAiming = !isAiming; });
+        window.addEventListener('mouseup', e => { if (e.button === 0) isFiring = false; });
+
+        let prevTime = performance.now();
+        function animate() {
+            if (isGameOver) return; // 게임 오버 시 루프 정지
+
+            requestAnimationFrame(animate);
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+
+            if (controls.isLocked) {
+                if (isFiring && time - lastFireTime > 120) { playerShoot(); lastFireTime = time; }
+
+                const healElapsed = time - lastHealTime;
+                const healUI = document.getElementById('heal-ui');
+                if (healElapsed < healCooldown) {
+                    healUI.innerText = `HEAL: RECHARGING (${((healCooldown-healElapsed)/1000).toFixed(1)}s)`;
+                    healUI.style.color = "#e67e22";
+                } else {
+                    healUI.innerText = health >= 100 ? "HEAL: HP FULL" : "HEAL: READY [X]";
+                    healUI.style.color = health >= 100 ? "#7f8c8d" : "#27ae60";
+                }
+                document.getElementById('hp-bar').style.width = Math.max(0, health) + "%";
+
+                const baseHeight = isCrouching ? 1.0 : 1.6;
+                velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta; velocity.y -= gravity * delta;
+
+                const accel = isCrouching ? 0.5 : (isAiming ? 0.8 : 2.5);
+                if (moveF) velocity.z -= accel * delta; if (moveB) velocity.z += accel * delta;
+                if (moveL) velocity.x -= accel * delta; if (moveR) velocity.x += accel * delta;
+
+                controls.moveRight(velocity.x); controls.moveForward(-velocity.z);
+                camera.position.y += (velocity.y * delta);
+                if (camera.position.y <= baseHeight) { velocity.y = 0; camera.position.y = baseHeight; canJump = true; }
+
+                if (!isReloading) gunGroup.position.lerp(isAiming ? aimPos : idlePos, 0.2);
+                camera.fov = THREE.MathUtils.lerp(camera.fov, isAiming ? 40 : 75, 0.2);
+                camera.updateProjectionMatrix();
+            }
+
+            enemies.forEach(enemy => {
+                if (enemy.userData.alive && controls.isLocked) {
+                    if (time - enemy.userData.lastShot > 150) { 
+                        const ePos = enemy.position.clone().add(new THREE.Vector3(0, 2.5, 0));
+                        const pPos = camera.position.clone();
+                        if (ePos.distanceTo(pPos) < 50) {
+                            createTracer(ePos, pPos, 0xff0000);
+                            health -= 0.4;
+                            if(health <= 0 && !isGameOver) { 
+                                isGameOver = true;
+                                controls.unlock();
+                                // 점프 표시는 여기에 포함됩니다.
+                                setTimeout(() => {
+                                    alert("--- GAME OVER ---\n\nFINAL SCORE: " + score + "\n\n확인을 누르면 재시작합니다.");
+                                    location.reload();
+                                }, 100);
+                            }
+                        }
+                        enemy.userData.lastShot = time;
+                    }
+                }
+            });
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
